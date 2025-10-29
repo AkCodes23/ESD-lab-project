@@ -1,30 +1,44 @@
 #include "LPC17xx.h"
 #include <stdio.h>
+#include <stdint.h>
 
-#define MPU6050_ADDR       (0x68 << 1)   // 7-bit I2C address for MPU6050 shifted left
-#define LED_PIN            (1 << 4)      // P0.4 for LED
-#define PWR_MGMT_1_REG     0x6B
-#define WHO_AM_I_REG       0x75
-#define ACCEL_XOUT_H       0x3B
+#define MPU6050_ADDR         (0x68 << 1)
+#define LED_PIN              (1 << 4)
+#define PWR_MGMT_1_REG       0x6B
+#define WHO_AM_I_REG         0x75
+#define ACCEL_XOUT_H         0x3B
+#define RS_CTRL              0x08000000
+#define EN_CTRL              0x10000000
+#define DT_CTRL              0x07800000
 
-#define RS_CTRL            0x08000000    // P0.27
-#define EN_CTRL            0x10000000    // P0.28
-#define DT_CTRL            0x07800000    // P0.23-P0.26
-
-#define MAX_ABS_G          17000
-#define DEBOUNCE_SAMPLES   4
-#define LCD_WIDTH          16
+#define MAX_ABS_G            17000
+#define DEBOUNCE_SAMPLES     4
+#define LCD_WIDTH            16
+#define THRESHOLD            400
 
 unsigned long init_command[] = {0x30,0x30,0x30,0x20,0x28,0x0c,0x06,0x01,0x80};
+
 char buffer[LCD_WIDTH+1];
 unsigned int flag1, temp1, temp2, flag2;
 unsigned int i;
 
-int16_t accel_x, prev_accel_x = 0;
+int16_t accel_x = 0, prev_accel_x = 0;
 unsigned int step_count = 0;
-const unsigned int threshold = 400;
 int16_t accel_history[DEBOUNCE_SAMPLES] = {0};
 uint8_t history_index = 0;
+uint8_t step_debounce = 0;
+
+void delay_ms(uint32_t ms);
+void lcd_write(void);
+void GPIO_Init(void);
+void I2C1_Init(void);
+void I2C1_Start(void);
+void I2C1_Stop(void);
+void I2C1_Write(uint8_t data);
+uint8_t I2C1_Read(uint8_t ack);
+uint8_t read_MPU6050_register(uint8_t reg);
+int read_MPU6050_accel_x(int16_t* accel_x);
+void DisplayStringAtLine(const char* str, uint8_t line);
 
 void delay_ms(uint32_t ms) {
     volatile uint32_t i;
@@ -32,7 +46,7 @@ void delay_ms(uint32_t ms) {
 }
 
 void lcd_write(void) {
-    flag2 = (flag1 == 1) ? 0 : ((temp1==0x30)||(temp1==0x20)) ? 1 : 0;
+    flag2 = (flag1 == 1) ? 0 : ((temp1 == 0x30)||(temp1 == 0x20)) ? 1 : 0;
     temp2 = (temp1 & 0xF0) << 19;
     LPC_GPIO0->FIOPIN = temp2;
 
@@ -122,12 +136,12 @@ uint8_t read_MPU6050_register(uint8_t reg) {
 int read_MPU6050_accel_x(int16_t* accel_x) {
     uint8_t msb, lsb;
     I2C1_Start();
-    I2C1_Write(MPU6050_ADDR);       
-    I2C1_Write(ACCEL_XOUT_H);       
-    I2C1_Start();                   
-    I2C1_Write(MPU6050_ADDR | 1);   
-    msb = I2C1_Read(1);             
-    lsb = I2C1_Read(0);             
+    I2C1_Write(MPU6050_ADDR);
+    I2C1_Write(ACCEL_XOUT_H);
+    I2C1_Start();
+    I2C1_Write(MPU6050_ADDR | 1);
+    msb = I2C1_Read(1);
+    lsb = I2C1_Read(0);
     I2C1_Stop();
     *accel_x = (int16_t)((msb << 8) | lsb);
     if(*accel_x == -1 || *accel_x == 0 || *accel_x > MAX_ABS_G || *accel_x < -MAX_ABS_G)
@@ -140,9 +154,8 @@ void DisplayStringAtLine(const char* str, uint8_t line) {
     temp1 = (line == 1) ? 0x80 : 0xC0;
     lcd_write();
     flag1 = 1;
-    i = 0;
-    while(str[i] != '\0' && i < LCD_WIDTH) {
-        temp1 = str[i++];
+    for(i = 0; i < LCD_WIDTH; i++) {
+        temp1 = (str[i] != '\0') ? str[i] : ' ';
         lcd_write();
     }
 }
@@ -169,18 +182,15 @@ int main(void) {
     I2C1_Stop();
     delay_ms(100);
 
-    // Confirm presence (WHO_AM_I)
     uint8_t who = read_MPU6050_register(WHO_AM_I_REG);
     if(who != 0x68) {
         DisplayStringAtLine("MPU Err!", 1);
         while(1);
     }
 
-    // Main Loop
     while(1) {
         int valid = read_MPU6050_accel_x(&accel_x);
 
-        // Outlier & comms filter
         if(valid != 0) {
             DisplayStringAtLine("Acc Err", 1);
             LPC_GPIO0->FIOCLR = LED_PIN;
@@ -188,18 +198,19 @@ int main(void) {
             continue;
         }
 
-        // Moving average filtering
+        // Moving average filter
         accel_history[history_index] = accel_x;
         history_index = (history_index + 1) % DEBOUNCE_SAMPLES;
         int32_t avg = 0;
-        for(int n = 0; n < DEBOUNCE_SAMPLES; n++) avg += accel_history[n];
+        for(unsigned int m = 0; m < DEBOUNCE_SAMPLES; m++) {
+            avg += accel_history[m];
+        }
         avg /= DEBOUNCE_SAMPLES;
 
-        // Step debounce
-        static uint8_t step_debounce = 0;
-        if (((prev_accel_x < -threshold && avg > threshold) ||
-            (prev_accel_x > threshold && avg < -threshold))) {
-            if (++step_debounce >= DEBOUNCE_SAMPLES) {
+        // Debounced step detection
+        if(((prev_accel_x < -THRESHOLD && avg > THRESHOLD) ||
+            (prev_accel_x > THRESHOLD && avg < -THRESHOLD))) {
+            if(++step_debounce >= DEBOUNCE_SAMPLES) {
                 step_count++;
                 step_debounce = 0;
             }
@@ -208,8 +219,7 @@ int main(void) {
         }
         prev_accel_x = avg;
 
-        // Show data
-        sprintf(buffer, "%d           ", (int)avg);
+        sprintf(buffer, "%ld           ", avg);
         DisplayStringAtLine(buffer, 1);
 
         sprintf(buffer, "Steps: %d     ", step_count);
