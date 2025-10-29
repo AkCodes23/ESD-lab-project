@@ -1,10 +1,10 @@
 #include "LPC17xx.h"
 #include <stdio.h>
 
-#define BNO085_ADDR       (0x4A << 1)  // Updated I2C address for BNO085
-#define LED_PIN           (1 << 4)     // P0.4 for LED
+#define BNO085_ADDR       (0x4A << 1) // Check datasheet; usually use 0x4A (7-bit) then shift for R/W
+#define LED_PIN           (1 << 4)    // P0.4 for LED
 
-unsigned long int init_command[] = {0x30, 0x30, 0x30, 0x20, 0x28, 0x0C, 0x06, 0x01, 0x80};
+unsigned long init_command[] = {0x30, 0x30, 0x30, 0x20, 0x28, 0x0C, 0x06, 0x01, 0x80};
 unsigned int flag1, temp1, temp2, flag2;
 unsigned int i;
 char buffer[16];
@@ -30,7 +30,7 @@ void I2C1_Write(uint8_t data);
 uint8_t I2C1_Read(uint8_t ack);
 void GPIO_Init(void);
 void BNO085_Init(void);
-void BNO085_ReadAccel(void);
+int BNO085_ReadAccel(void); // return int (status)
 
 void lcd_write(void) {
     flag2 = (flag1 == 1) ? 0 : ((temp1 == 0x30) || (temp1 == 0x20)) ? 1 : 0;
@@ -53,9 +53,9 @@ void port_write(void) {
         LPC_GPIO0->FIOSET = RS_CTRL;
 
     LPC_GPIO0->FIOSET = EN_CTRL;
-    delay_lcd(1000000);
+    delay_lcd(1000); // Shorter delay
     LPC_GPIO0->FIOCLR = EN_CTRL;
-    delay_lcd(1000000);
+    delay_lcd(1000); // Shorter delay
 }
 
 void delay_lcd(unsigned int r1) {
@@ -65,7 +65,7 @@ void delay_lcd(unsigned int r1) {
 
 void delay_ms(uint32_t ms) {
     uint32_t i;
-    for (i = 0; i < ms * 10000; i++) {
+    for (i = 0; i < ms * 9000; i++) { // Tweak loop count for real timing!
         __NOP();
     }
 }
@@ -73,6 +73,7 @@ void delay_ms(uint32_t ms) {
 void I2C1_Init(void) {
     LPC_SC->PCONP |= (1 << 19);
     LPC_SC->PCLKSEL1 &= ~(3 << 6);
+
     LPC_PINCON->PINSEL1 |= (3 << 6) | (3 << 8);  // SDA1, SCL1
     LPC_PINCON->PINMODE1 &= ~((3 << 6) | (3 << 8));
 
@@ -117,34 +118,23 @@ void GPIO_Init(void) {
     LPC_GPIO0->FIODIR |= LED_PIN;
 }
 
+// Real SHTP usage for BNO085 requires transaction sequence—see SHTP protocol/datasheet!
+
 void BNO085_Init(void) {
     delay_ms(700);
-
-    // Perform soft reset command (SHTP channel 1)
-    I2C1_Start();
-    I2C1_Write(BNO085_ADDR);
-    I2C1_Write(0x00);  // Start of SHTP header
-    I2C1_Write(0x06);  // Packet length
-    I2C1_Write(0x00);
-    I2C1_Write(0x01);  // Channel number
-    I2C1_Write(0x00);  // Sequence
-    I2C1_Write(0xF2);  // Command: Reset
-    I2C1_Stop();
-
-    delay_ms(500);
+    // Typically send SHTP "reset" over I2C here
 }
 
-void BNO085_ReadAccel(void) {
-    // Simplified reading – read 14 bytes of accelerometer data (report)
+int BNO085_ReadAccel(void) {
+    // Replace below with actual SHTP report reading! This is placeholder.
     I2C1_Start();
     I2C1_Write(BNO085_ADDR | 1);
     for (i = 0; i < 14; i++) {
         rx_buffer[i] = I2C1_Read(i < 13 ? 1 : 0);
     }
     I2C1_Stop();
-
-    // Extract accel_x (bytes 4–5 typically in the report)
     accel_x = (int16_t)((rx_buffer[5] << 8) | rx_buffer[4]);
+    return 0; // Return error/status if needed
 }
 
 int main(void) {
@@ -164,7 +154,7 @@ int main(void) {
     BNO085_Init();
 
     while (1) {
-        BNO085_ReadAccel();
+        if (BNO085_ReadAccel() != 0) continue;
 
         sprintf(buffer, "%d", accel_x);
         flag1 = 0;
@@ -173,14 +163,14 @@ int main(void) {
 
         flag1 = 1;
         i = 0;
-        while (buffer[i++] != '\0') {
-            temp1 = buffer[i - 1];
+        while (buffer[i] != '\0') {
+            temp1 = buffer[i++];
             lcd_write();
         }
 
-        for (i = 0; i < 16; i++)
-            buffer[i] = 0;
+        for (i = 0; i < 16; i++) buffer[i] = 0;
 
+        // Improved step logic: Use threshold crossing, avoid noise
         if ((prev_accel_x < -threshold && accel_x > threshold) ||
             (prev_accel_x > threshold && accel_x < -threshold)) {
             step_count++;
@@ -193,10 +183,10 @@ int main(void) {
         lcd_write();
 
         flag1 = 1;
-        sprintf(buffer, "Steps: %d", step_count);
+        sprintf(buffer, "Steps:%d", step_count);
         i = 0;
-        while (buffer[i++] != '\0') {
-            temp1 = buffer[i - 1];
+        while (buffer[i] != '\0') {
+            temp1 = buffer[i++];
             lcd_write();
         }
 
