@@ -63,7 +63,7 @@ void delay_ms(uint32_t ms) {
 
 void I2C1_Init(void) {
     LPC_SC->PCONP |= (1 << 19);  // Power on I2C1
-    LPC_SC->PCLKSEL1 &= ~(3 << 6); // Peripheral clock for I2C1
+    LPC_SC->PCLKSEL1 &= ~(3 << 6);
     LPC_PINCON->PINSEL1 |= (3 << 6) | (3 << 8);  // P0.19 SDA1, P0.20 SCL1
     LPC_PINCON->PINMODE1 &= ~((3 << 6) | (3 << 8)); // Pull-ups enabled
     LPC_I2C1->I2SCLH = 60;
@@ -73,21 +73,21 @@ void I2C1_Init(void) {
 }
 
 void I2C1_Start(void) {
-    LPC_I2C1->I2CONSET = (1 << 5);  // STA set
-    while (!(LPC_I2C1->I2CONSET & (1 << 3)));  // Wait SI
-    LPC_I2C1->I2CONCLR = (1 << 5);  // Clear STA
+    LPC_I2C1->I2CONSET = (1 << 5);
+    while (!(LPC_I2C1->I2CONSET & (1 << 3)));
+    LPC_I2C1->I2CONCLR = (1 << 5);
 }
 
 void I2C1_Stop(void) {
-    LPC_I2C1->I2CONSET = (1 << 4);  // STO set
-    LPC_I2C1->I2CONCLR = (1 << 3);  // Clear SI
-    while (LPC_I2C1->I2CONSET & (1 << 4));  // Wait stop
+    LPC_I2C1->I2CONSET = (1 << 4);
+    LPC_I2C1->I2CONCLR = (1 << 3);
+    while (LPC_I2C1->I2CONSET & (1 << 4));
 }
 
 void I2C1_Write(uint8_t data) {
     LPC_I2C1->I2DAT = data;
-    LPC_I2C1->I2CONCLR = (1 << 3);  // Clear SI
-    while (!(LPC_I2C1->I2CONSET & (1 << 3)));  // Wait SI
+    LPC_I2C1->I2CONCLR = (1 << 3);
+    while (!(LPC_I2C1->I2CONSET & (1 << 3)));
 }
 
 uint8_t I2C1_Read(uint8_t ack) {
@@ -95,13 +95,13 @@ uint8_t I2C1_Read(uint8_t ack) {
         LPC_I2C1->I2CONSET = (1 << 2);
     else
         LPC_I2C1->I2CONCLR = (1 << 2);
-    LPC_I2C1->I2CONCLR = (1 << 3);  // Clear SI
+    LPC_I2C1->I2CONCLR = (1 << 3);
     while (!(LPC_I2C1->I2CONSET & (1 << 3)));
     return LPC_I2C1->I2DAT;
 }
 
 void GPIO_Init(void) {
-    LPC_PINCON->PINSEL0 &= ~(3 << 8);  // P0.4 GPIO
+    LPC_PINCON->PINSEL0 &= ~(3 << 8);
     LPC_GPIO0->FIODIR |= LED_PIN;
 }
 
@@ -120,23 +120,22 @@ int main(void) {
     I2C1_Init();
     delay_ms(700);
 
-    // Write 0x0C to BNO055 mode register 0x3D for NDOF mode
+    // Put BNO055 into NDOF mode
     I2C1_Start();
-    I2C1_Write(BNO055_ADDR);  // Write mode
-    I2C1_Write(0x3D);         // Mode register
-    I2C1_Write(0x0C);         // NDOF mode
+    I2C1_Write(BNO055_ADDR);
+    I2C1_Write(0x3D);  // Mode register
+    I2C1_Write(0x0C);  // NDOF mode
     I2C1_Stop();
-
-    delay_ms(100);  // Delay for mode stabilization
+    delay_ms(100);
 
     while (1) {
-        // Set register pointer to 0x08 (ACCEL_DATA_X_LSB)
+        // Set register pointer to ACCEL_X_LSB (0x08)
         I2C1_Start();
         I2C1_Write(BNO055_ADDR);
         I2C1_Write(0x08);
         I2C1_Stop();
 
-        // Read 2 bytes for accel_x
+        // Read 2 bytes of accelerometer X data
         I2C1_Start();
         I2C1_Write(BNO055_ADDR | 1);
         lsb = I2C1_Read(1);
@@ -145,12 +144,30 @@ int main(void) {
 
         accel_x = (int16_t)((msb << 8) | lsb);
 
+        // Validate accel_x to avoid invalid reads (-1 or out of range)
+        if (accel_x == -1 || accel_x == 0x0000 || accel_x > 20000 || accel_x < -20000) {
+            sprintf(buffer, "Acc Err");
+            flag1 = 0;
+            temp1 = 0x80;
+            lcd_write();
+            flag1 = 1;
+            i = 0;
+            while (buffer[i] != '\0') {
+                temp1 = buffer[i++];
+                lcd_write();
+            }
+            for (i = 0; i < 16; i++) buffer[i] = 0;
+
+            LPC_GPIO0->FIOCLR = LED_PIN;
+            delay_ms(200);
+            continue;
+        }
+
         // Display accel_x on LCD first line
         sprintf(buffer, "%d", accel_x);
         flag1 = 0;
-        temp1 = 0x80;  // LCD line 1
+        temp1 = 0x80;
         lcd_write();
-
         flag1 = 1;
         i = 0;
         while (buffer[i] != '\0') {
@@ -159,18 +176,17 @@ int main(void) {
         }
         for (i = 0; i < 16; i++) buffer[i] = 0;
 
-        // Step counting logic
+        // Step detection logic
         if ((prev_accel_x < -threshold && accel_x > threshold) ||
             (prev_accel_x > threshold && accel_x < -threshold)) {
             step_count++;
         }
         prev_accel_x = accel_x;
 
-        // Display step count second line of LCD
+        // Display step count on second line
         flag1 = 0;
-        temp1 = 0xC0;  // LCD line 2
+        temp1 = 0xC0;
         lcd_write();
-
         flag1 = 1;
         sprintf(buffer, "Steps: %d", step_count);
         i = 0;
@@ -180,7 +196,7 @@ int main(void) {
         }
         for (i = 0; i < 16; i++) buffer[i] = 0;
 
-        // LED indication for valid data
+        // LED indicates valid data presence
         if (accel_x != 0xFFFF && accel_x != 0x0000)
             LPC_GPIO0->FIOSET = LED_PIN;
         else
